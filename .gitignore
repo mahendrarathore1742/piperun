@@ -1,0 +1,5 @@
+*.exe
+/piperun
+/dist/
+/vendor/
+.DS_Store
