@@ -238,4 +238,3 @@ Contributions are welcome! Please:
 
 ---
 
-> *Inspired by the architecture of [togomak](https://github.com/srevinsaju/togomak) and [Terraform](https://terraform.io), built from scratch as an independent open-source project.*
