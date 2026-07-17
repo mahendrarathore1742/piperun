@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"os"
 	"testing"
 
 	"github.com/piperun/piperun/internal/schema"
@@ -110,5 +111,164 @@ func TestEngineBlockList(t *testing.T) {
 		if r.Stage == "b" && r.Status != "skipped" {
 			t.Errorf("expected b to be skipped, got %s", r.Status)
 		}
+	}
+}
+
+func TestEvalConditionEnvEqual(t *testing.T) {
+	eng := New(&schema.Pipeline{
+		Variables: make(map[string]*schema.Variable),
+		Locals:    make(map[string]string),
+	})
+
+	os.Setenv("TEST_COND_EQ", "hello")
+	defer os.Unsetenv("TEST_COND_EQ")
+
+	if !eng.evalCondition(`env("TEST_COND_EQ") == "hello"`) {
+		t.Error("expected true for env == hello")
+	}
+	if eng.evalCondition(`env("TEST_COND_EQ") == "world"`) {
+		t.Error("expected false for env == world")
+	}
+}
+
+func TestEvalConditionEnvNotEqual(t *testing.T) {
+	eng := New(&schema.Pipeline{
+		Variables: make(map[string]*schema.Variable),
+		Locals:    make(map[string]string),
+	})
+
+	os.Setenv("TEST_COND_NEQ", "hello")
+	defer os.Unsetenv("TEST_COND_NEQ")
+
+	if eng.evalCondition(`env("TEST_COND_NEQ") != "hello"`) {
+		t.Error("expected false for env != hello")
+	}
+	if !eng.evalCondition(`env("TEST_COND_NEQ") != "world"`) {
+		t.Error("expected true for env != world")
+	}
+}
+
+func TestEvalConditionVarEqual(t *testing.T) {
+	eng := New(&schema.Pipeline{
+		Variables: map[string]*schema.Variable{},
+		Locals:    make(map[string]string),
+	})
+	eng.Variables["debug"] = "true"
+
+	if !eng.evalCondition(`var("debug") == "true"`) {
+		t.Error("expected true for var debug == true")
+	}
+	if eng.evalCondition(`var("debug") == "false"`) {
+		t.Error("expected false for var debug == false")
+	}
+}
+
+func TestEvalConditionNumericComparison(t *testing.T) {
+	eng := New(&schema.Pipeline{
+		Variables: map[string]*schema.Variable{},
+		Locals:    make(map[string]string),
+	})
+	eng.Variables["port"] = "8080"
+
+	if !eng.evalCondition(`var("port") > "1024"`) {
+		t.Error("expected 8080 > 1024")
+	}
+	if eng.evalCondition(`var("port") < "1024"`) {
+		t.Error("expected 8080 not < 1024")
+	}
+	if !eng.evalCondition(`var("port") >= "8080"`) {
+		t.Error("expected 8080 >= 8080")
+	}
+	if !eng.evalCondition(`var("port") <= "8080"`) {
+		t.Error("expected 8080 <= 8080")
+	}
+}
+
+func TestEvalConditionRegex(t *testing.T) {
+	eng := New(&schema.Pipeline{
+		Variables: make(map[string]*schema.Variable),
+		Locals:    make(map[string]string),
+	})
+
+	os.Setenv("TEST_REGEX", "feature-123")
+	defer os.Unsetenv("TEST_REGEX")
+
+	if !eng.evalCondition(`env("TEST_REGEX") =~ "feature-\d+"`) {
+		t.Error("expected regex match")
+	}
+	if eng.evalCondition(`env("TEST_REGEX") =~ "^release-"`) {
+		t.Error("expected no regex match")
+	}
+	if !eng.evalCondition(`env("TEST_REGEX") !~ "^release-"`) {
+		t.Error("expected regex not match")
+	}
+}
+
+func TestEvalConditionLogicalOperators(t *testing.T) {
+	eng := New(&schema.Pipeline{
+		Variables: make(map[string]*schema.Variable),
+		Locals:    make(map[string]string),
+	})
+
+	os.Setenv("TEST_CI", "true")
+	os.Setenv("TEST_BRANCH", "main")
+	defer os.Unsetenv("TEST_CI")
+	defer os.Unsetenv("TEST_BRANCH")
+
+	// AND
+	if !eng.evalCondition(`env("TEST_CI") == "true" && env("TEST_BRANCH") == "main"`) {
+		t.Error("expected AND to be true")
+	}
+	if eng.evalCondition(`env("TEST_CI") == "true" && env("TEST_BRANCH") == "dev"`) {
+		t.Error("expected AND to be false")
+	}
+
+	// OR
+	if !eng.evalCondition(`env("TEST_CI") == "true" || env("TEST_BRANCH") == "dev"`) {
+		t.Error("expected OR to be true")
+	}
+	if eng.evalCondition(`env("TEST_CI") == "false" || env("TEST_BRANCH") == "dev"`) {
+		t.Error("expected OR to be false")
+	}
+}
+
+func TestEvalConditionNegation(t *testing.T) {
+	eng := New(&schema.Pipeline{
+		Variables: make(map[string]*schema.Variable),
+		Locals:    make(map[string]string),
+	})
+
+	os.Setenv("TEST_NEG", "true")
+	defer os.Unsetenv("TEST_NEG")
+
+	if eng.evalCondition(`!env("TEST_NEG") == "true"`) {
+		t.Error("expected negation to be false")
+	}
+	if !eng.evalCondition(`!env("TEST_NEG") == "false"`) {
+		t.Error("expected negation to be true")
+	}
+}
+
+func TestEvalConditionTruthy(t *testing.T) {
+	eng := New(&schema.Pipeline{
+		Variables: make(map[string]*schema.Variable),
+		Locals:    make(map[string]string),
+	})
+
+	os.Setenv("TEST_TRUTHY", "yes")
+	defer os.Unsetenv("TEST_TRUTHY")
+
+	if !eng.evalCondition(`env("TEST_TRUTHY")`) {
+		t.Error("expected truthy check to be true")
+	}
+
+	os.Setenv("TEST_FALSY", "false")
+	if eng.evalCondition(`env("TEST_FALSY")`) {
+		t.Error("expected 'false' to be falsy")
+	}
+
+	os.Setenv("TEST_ZERO", "0")
+	if eng.evalCondition(`env("TEST_ZERO")`) {
+		t.Error("expected '0' to be falsy")
 	}
 }
