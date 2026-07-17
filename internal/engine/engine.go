@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -260,40 +262,197 @@ func (e *Engine) interpolateWithEach(s string, eachValue *string) string {
 	return result
 }
 
-// evalCondition evaluates a simple string condition.
+// evalCondition evaluates a condition expression.
 // Supported patterns:
 //
-//	env("KEY") == "value"  - true if env var equals value
-//	env("KEY") != "value"  - true if env var does not equal value
-//
-// Unrecognized expressions default to false (fail-safe).
+//	env("KEY") == "value"   - env var equals value
+//	env("KEY") != "value"   - env var not equal to value
+//	env("KEY") > "value"    - env var greater than value
+//	env("KEY") < "value"    - env var less than value
+//	env("KEY") >= "value"   - env var greater than or equal
+//	env("KEY") <= "value"   - env var less than or equal
+//	env("KEY") =~ "pattern" - env var matches regex
+//	env("KEY") !~ "pattern" - env var does not match regex
+//	var("KEY") == "value"   - variable equals value (same operators as env)
+//	!expr                   - negation
+//	expr1 && expr2          - logical AND
+//	expr1 || expr2          - logical OR
+//	env("KEY")              - truthy check (non-empty, non-"false", non-"0")
 func (e *Engine) evalCondition(expr string) bool {
 	expr = strings.TrimSpace(expr)
 
-	// env("KEY") == "value"
-	if strings.Contains(expr, "==") {
-		parts := strings.SplitN(expr, "==", 2)
-		left := strings.TrimSpace(parts[0])
-		right := strings.Trim(strings.TrimSpace(parts[1]), "\"")
+	// Handle || (OR) - lowest precedence
+	if idx := findOperatorOutsideParens(expr, "||"); idx >= 0 {
+		left := expr[:idx]
+		right := expr[idx+2:]
+		return e.evalCondition(left) || e.evalCondition(right)
+	}
 
-		if strings.HasPrefix(left, "env(") {
-			key := strings.Trim(strings.TrimPrefix(left, "env("), "\")")
-			return os.Getenv(key) == right
+	// Handle && (AND) - higher precedence than ||
+	if idx := findOperatorOutsideParens(expr, "&&"); idx >= 0 {
+		left := expr[:idx]
+		right := expr[idx+2:]
+		return e.evalCondition(left) && e.evalCondition(right)
+	}
+
+	// Handle negation: !expr
+	if strings.HasPrefix(expr, "!") {
+		return !e.evalCondition(expr[1:])
+	}
+
+	// Handle parenthesized expressions: (expr)
+	if strings.HasPrefix(expr, "(") && strings.HasSuffix(expr, ")") {
+		return e.evalCondition(expr[1 : len(expr)-1])
+	}
+
+	// Try binary operators: =~ !~ == != >= <= > <
+	for _, op := range []string{"=~", "!~", "==", "!=", ">=", "<=", ">", "<"} {
+		if idx := findOperatorOutsideParens(expr, op); idx >= 0 {
+			left := strings.TrimSpace(expr[:idx])
+			right := strings.TrimSpace(expr[idx+len(op):])
+			return e.evalBinaryOp(left, op, right)
 		}
 	}
 
-	// env("KEY") != "value"
-	if strings.Contains(expr, "!=") {
-		parts := strings.SplitN(expr, "!=", 2)
-		left := strings.TrimSpace(parts[0])
-		right := strings.Trim(strings.TrimSpace(parts[1]), "\"")
+	// Truthy check for env("KEY") or var("KEY")
+	return e.resolveValue(expr)
+}
 
-		if strings.HasPrefix(left, "env(") {
-			key := strings.Trim(strings.TrimPrefix(left, "env("), "\")")
-			return os.Getenv(key) != right
+// findOperatorOutsideParens finds the last occurrence of op that is not inside
+// parentheses or quotes, returning its index or -1 if not found.
+func findOperatorOutsideParens(expr, op string) int {
+	depth := 0
+	inQuote := false
+	quoteChar := byte(0)
+
+	for i := len(expr) - 1; i >= 0; i-- {
+		c := expr[i]
+
+		if inQuote {
+			if c == quoteChar && (i == 0 || expr[i-1] != '\\') {
+				inQuote = false
+			}
+			continue
+		}
+
+		switch c {
+		case '"', '\'':
+			inQuote = true
+			quoteChar = c
+		case ')':
+			depth++
+		case '(':
+			depth--
+		default:
+			if depth == 0 && i >= len(op)-1 {
+				matched := true
+				for j := 0; j < len(op); j++ {
+					if expr[i-(len(op)-1)+j] != op[j] {
+						matched = false
+						break
+					}
+				}
+				if matched {
+					if (op == ">" || op == "<") && i > 0 {
+						prev := expr[i-1]
+						if prev == '=' || prev == '!' {
+							continue
+						}
+					}
+					return i - (len(op) - 1)
+				}
+			}
+		}
+	}
+	return -1
+}
+
+// evalBinaryOp evaluates a binary operation like left op right.
+func (e *Engine) evalBinaryOp(left, op, right string) bool {
+	leftVal := e.resolveValueRaw(left)
+	rightVal := e.resolveValueRaw(right)
+
+	if leftNum, err1 := strconv.ParseFloat(leftVal, 64); err1 == nil {
+		if rightNum, err2 := strconv.ParseFloat(rightVal, 64); err2 == nil {
+			switch op {
+			case "==":
+				return leftNum == rightNum
+			case "!=":
+				return leftNum != rightNum
+			case ">":
+				return leftNum > rightNum
+			case "<":
+				return leftNum < rightNum
+			case ">=":
+				return leftNum >= rightNum
+			case "<=":
+				return leftNum <= rightNum
+			}
 		}
 	}
 
-	// Unrecognized expression - fail-safe: skip the stage
+	leftStr := strings.Trim(leftVal, "\"")
+	rightStr := strings.Trim(rightVal, "\"")
+
+	switch op {
+	case "==":
+		return leftStr == rightStr
+	case "!=":
+		return leftStr != rightStr
+	case ">":
+		return leftStr > rightStr
+	case "<":
+		return leftStr < rightStr
+	case ">=":
+		return leftStr >= rightStr
+	case "<=":
+		return leftStr <= rightStr
+	case "=~":
+		re, err := regexp.Compile(rightStr)
+		if err != nil {
+			return false
+		}
+		return re.MatchString(leftStr)
+	case "!~":
+		re, err := regexp.Compile(rightStr)
+		if err != nil {
+			return true
+		}
+		return !re.MatchString(leftStr)
+	}
+
 	return false
+}
+
+// resolveValue returns true if the expression is truthy.
+func (e *Engine) resolveValue(expr string) bool {
+	val := e.resolveValueRaw(expr)
+	return val != "" && val != "false" && val != "0"
+}
+
+// resolveValueRaw returns the raw string value of an expression.
+func (e *Engine) resolveValueRaw(expr string) string {
+	expr = strings.TrimSpace(expr)
+
+	// env("KEY")
+	if strings.HasPrefix(expr, "env(\"") && strings.HasSuffix(expr, "\")") {
+		key := expr[5 : len(expr)-2]
+		return os.Getenv(key)
+	}
+
+	// var("KEY")
+	if strings.HasPrefix(expr, "var(\"") && strings.HasSuffix(expr, "\")") {
+		key := expr[5 : len(expr)-2]
+		if val, ok := e.Variables[key]; ok {
+			return val
+		}
+		return ""
+	}
+
+	// Strip quotes if present
+	if strings.HasPrefix(expr, "\"") && strings.HasSuffix(expr, "\"") {
+		return expr[1 : len(expr)-1]
+	}
+
+	return expr
 }
