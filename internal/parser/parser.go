@@ -60,6 +60,25 @@ type rawLocals struct {
 	Remain hcl.Body `hcl:",remain"`
 }
 
+// decodeLocals extracts string attributes from a locals block body.
+func decodeLocals(body hcl.Body, ctx *hcl.EvalContext) (map[string]string, error) {
+	attrs, diags := body.JustAttributes()
+	if diags.HasErrors() {
+		return nil, diags
+	}
+	result := make(map[string]string, len(attrs))
+	for name, attr := range attrs {
+		val, diags := attr.Expr.Value(ctx)
+		if diags.HasErrors() {
+			return nil, fmt.Errorf("locals.%s: %w", name, diags)
+		}
+		if val.Type() == cty.String {
+			result[name] = val.AsString()
+		}
+	}
+	return result, nil
+}
+
 // ParseFile reads and decodes a piperun HCL file, returning a Pipeline.
 func ParseFile(path string) (*schema.Pipeline, error) {
 	src, err := os.ReadFile(path)
@@ -119,6 +138,17 @@ func Parse(src []byte, filename string) (*schema.Pipeline, error) {
 			sv.Description = *v.Description
 		}
 		p.Variables[v.Name] = sv
+	}
+
+	// locals
+	for _, l := range raw.Locals {
+		locals, err := decodeLocals(l.Remain, ctx)
+		if err != nil {
+			return nil, fmt.Errorf("decode locals: %w", err)
+		}
+		for k, v := range locals {
+			p.Locals[k] = v
+		}
 	}
 
 	// stages

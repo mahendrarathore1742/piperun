@@ -138,13 +138,19 @@ func (e *Engine) shouldRun(st *schema.Stage) bool {
 
 // executeStage runs a single stage (with hooks).
 func (e *Engine) executeStage(ctx context.Context, st *schema.Stage) Result {
-	start := time.Now()
 	name := st.Name
 	e.Log.Info(name, fmt.Sprintf("[+] %s", name))
 
+	return e.executeSingleStage(ctx, st, name, nil)
+}
+
+// executeSingleStage runs the actual stage logic (hooks, condition, script/container).
+func (e *Engine) executeSingleStage(ctx context.Context, st *schema.Stage, name string, eachValue *string) Result {
+	start := time.Now()
+
 	// Pre-hook
 	if st.PreHook != nil {
-		hookScript := e.interpolate(st.PreHook.Script)
+		hookScript := e.interpolateWithEach(st.PreHook.Script, eachValue)
 		if e.DryRun {
 			e.Log.Info(name, fmt.Sprintf("(dry-run) pre_hook: %s", hookScript))
 		} else {
@@ -159,7 +165,7 @@ func (e *Engine) executeStage(ctx context.Context, st *schema.Stage) Result {
 	// Conditional
 	if st.If != "" {
 		if !e.evalCondition(st.If) {
-			e.Log.Info(name, "condition false → skipped")
+			e.Log.Info(name, "condition false -> skipped")
 			return Result{Stage: name, Status: "skipped", Duration: time.Since(start)}
 		}
 	}
@@ -172,7 +178,7 @@ func (e *Engine) executeStage(ctx context.Context, st *schema.Stage) Result {
 		}
 	} else if st.Script != "" {
 		// Script-based execution
-		script := e.interpolate(st.Script)
+		script := e.interpolateWithEach(st.Script, eachValue)
 		if e.DryRun {
 			e.Log.Info(name, fmt.Sprintf("(dry-run) %s", script))
 		} else {
@@ -185,7 +191,7 @@ func (e *Engine) executeStage(ctx context.Context, st *schema.Stage) Result {
 
 	// Post-hook
 	if st.PostHook != nil {
-		hookScript := e.interpolate(st.PostHook.Script)
+		hookScript := e.interpolateWithEach(st.PostHook.Script, eachValue)
 		if e.DryRun {
 			e.Log.Info(name, fmt.Sprintf("(dry-run) post_hook: %s", hookScript))
 		} else {
@@ -223,7 +229,7 @@ func (e *Engine) runContainer(ctx context.Context, st *schema.Stage) error {
 		return fmt.Errorf("docker pull %s: %s (%w)", image, string(out), err)
 	}
 
-	script := e.interpolate(st.Script)
+	script := e.interpolateWithEach(st.Script, nil)
 	args := []string{"run", "--rm", image, "sh", "-c", script}
 	runCmd := exec.CommandContext(ctx, "docker", args...)
 	runCmd.Env = os.Environ()
@@ -236,8 +242,8 @@ func (e *Engine) runContainer(ctx context.Context, st *schema.Stage) error {
 	return err
 }
 
-// interpolate performs simple ${var.xxx} and ${local.xxx} substitution.
-func (e *Engine) interpolate(s string) string {
+// interpolateWithEach performs ${var.xxx}, ${local.xxx}, and ${each.value} substitution.
+func (e *Engine) interpolateWithEach(s string, eachValue *string) string {
 	result := s
 	// Variable interpolation
 	for k, v := range e.Variables {
@@ -247,13 +253,24 @@ func (e *Engine) interpolate(s string) string {
 	for k, v := range e.Pipeline.Locals {
 		result = strings.ReplaceAll(result, fmt.Sprintf("${local.%s}", k), v)
 	}
+	// each.value interpolation
+	if eachValue != nil {
+		result = strings.ReplaceAll(result, "${each.value}", *eachValue)
+	}
 	return result
 }
 
-// evalCondition evaluates a simple string condition (very basic for now).
+// evalCondition evaluates a simple string condition.
+// Supported patterns:
+//
+//	env("KEY") == "value"  - true if env var equals value
+//	env("KEY") != "value"  - true if env var does not equal value
+//
+// Unrecognized expressions default to false (fail-safe).
 func (e *Engine) evalCondition(expr string) bool {
-	// Simple environment variable equality check: env("KEY") == "value"
 	expr = strings.TrimSpace(expr)
+
+	// env("KEY") == "value"
 	if strings.Contains(expr, "==") {
 		parts := strings.SplitN(expr, "==", 2)
 		left := strings.TrimSpace(parts[0])
@@ -264,6 +281,19 @@ func (e *Engine) evalCondition(expr string) bool {
 			return os.Getenv(key) == right
 		}
 	}
-	// Default: run
-	return true
+
+	// env("KEY") != "value"
+	if strings.Contains(expr, "!=") {
+		parts := strings.SplitN(expr, "!=", 2)
+		left := strings.TrimSpace(parts[0])
+		right := strings.Trim(strings.TrimSpace(parts[1]), "\"")
+
+		if strings.HasPrefix(left, "env(") {
+			key := strings.Trim(strings.TrimPrefix(left, "env("), "\")")
+			return os.Getenv(key) != right
+		}
+	}
+
+	// Unrecognized expression - fail-safe: skip the stage
+	return false
 }
